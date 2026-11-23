@@ -1,0 +1,16 @@
+com/template/config/SecurityConfiguration.class
+com/template/model/Module.class
+com/template/dao/RoleRepository.class
+com/template/model/RoleEntity.class
+com/template/config/PasswordUtil.class
+com/template/config/RoleBasedTokenEnhancer.class
+com/template/model/UserEntity.class
+com/template/model/CustomUserDetails.class
+com/template/config/CustomUserService.class
+com/template/dao/RoleModuleRepository.class
+com/template/config/DatabaseConfig.class
+com/template/config/CustomAuthenticationProvider.class
+com/template/AuthApplication.class
+com/template/dao/UserRepository.class
+com/template/config/OAuthConfiguration.class
+com/template/config/OAuthConfiguration$JwtJweAccessTokenConverter.class

@@ -1,0 +1,15 @@
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/CustomUserService.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/CustomAuthenticationProvider.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/dao/RoleModuleRepository.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/SecurityConfiguration.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/OAuthConfiguration.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/model/CustomUserDetails.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/RoleBasedTokenEnhancer.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/model/Module.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/AuthApplication.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/model/UserEntity.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/dao/UserRepository.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/dao/RoleRepository.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/DatabaseConfig.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/model/RoleEntity.java
+/home/sakhaglobal/Documents/Auth3/src/main/java/com/template/config/PasswordUtil.java
