@@ -12,9 +12,12 @@ name: SonarQube Cloud
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
+  # Pull request analysis needs a public repo or a paid SonarQube Cloud plan.
+  # The free plan only gives results for the main branch of a private repo.
+  # If the repo is public (or the plan is paid), uncomment these two lines:
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -130,7 +133,14 @@ jobs:
           async function api(path, params) {
             const url = `${SONAR_HOST}/api/${path}?` + new URLSearchParams({ ...params, ...scope });
             const r = await fetch(url, { headers: { authorization: auth } });
-            if (!r.ok) throw new Error(`${path}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+            if (!r.ok) {
+              const text = await r.text();
+              if (r.status === 403 && /non main branch/i.test(text)) {
+                console.error('SonarQube Cloud refused: on this plan it only gives results for the main branch. Run the workflow on main, make the repo public, or use a paid plan.');
+                process.exit(1);
+              }
+              throw new Error(`${path}: HTTP ${r.status} ${text.slice(0, 200)}`);
+            }
             return r.json();
           }
           async function all(path, params, field) {
