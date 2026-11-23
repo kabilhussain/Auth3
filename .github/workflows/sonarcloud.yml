@@ -21,7 +21,7 @@ permissions:
 
 env:
   SONAR_ORGANIZATION: kabilhussain
-  SONAR_PROJECT_KEY: kabilhussain_REPLACE_WITH_REPO_NAME
+  SONAR_PROJECT_KEY: kabilhussain_auth3
   SONAR_HOST: https://sonarcloud.io
   JAVA_VERSION: '17'
 
