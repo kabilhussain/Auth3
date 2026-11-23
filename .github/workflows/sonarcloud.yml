@@ -1,0 +1,184 @@
+# SonarQube Cloud analysis for a Java project (Maven or Gradle), with a separate report.
+# The report is shown on the run's Summary page and saved as the "sonar-report" artifact
+# (sonar-report.md, sonar-issues.csv, sonar-report.json).
+#
+# Before the first run:
+#   1. Repo secret SONAR_TOKEN (SonarQube Cloud > My Account > Security > Generate token)
+#   2. Set SONAR_ORGANIZATION and SONAR_PROJECT_KEY below (SonarQube Cloud > project > Information)
+#   3. SonarQube Cloud > project > Administration > Analysis Method > turn Automatic Analysis OFF
+
+name: SonarQube Cloud
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SONAR_ORGANIZATION: kabilhussain
+  SONAR_PROJECT_KEY: kabilhussain_REPLACE_WITH_REPO_NAME
+  SONAR_HOST: https://sonarcloud.io
+  JAVA_VERSION: '17'
+
+jobs:
+  sonar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history: SonarQube Cloud needs it to find new code
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      # ---------- Maven project ----------
+      - name: Build and analyze (Maven)
+        id: maven
+        if: hashFiles('pom.xml') != ''
+        continue-on-error: true   # a failed quality gate still produces the report; the job fails at the end
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: >
+          mvn -B -DskipTests verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
+          -Dsonar.host.url=$SONAR_HOST
+          -Dsonar.organization=$SONAR_ORGANIZATION
+          -Dsonar.projectKey=$SONAR_PROJECT_KEY
+          -Dsonar.qualitygate.wait=true
+
+      # ---------- Gradle project ----------
+      - name: Compile (Gradle)
+        id: gradle_build
+        if: hashFiles('pom.xml') == '' && (hashFiles('build.gradle') != '' || hashFiles('build.gradle.kts') != '')
+        run: |
+          if [ -f gradlew ]; then chmod +x gradlew; G=./gradlew; else G=gradle; fi
+          $G classes testClasses -x test --no-daemon
+          bins=$(find . -type d -path '*/build/classes/java/main' -not -path './.git/*' | sed 's|^\./||' | paste -sd, -)
+          srcs=$(find . -type d -path '*/src/main/java' -not -path './.git/*' | sed 's|^\./||' | paste -sd, -)
+          tests=$(find . -type d -path '*/src/test/java' -not -path './.git/*' | sed 's|^\./||' | paste -sd, -)
+          echo "binaries=${bins:-build/classes}" >> "$GITHUB_OUTPUT"
+          echo "sources=${srcs:-.}" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
+      - name: Analyze (Gradle)
+        id: gradle
+        if: steps.gradle_build.outcome == 'success'
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.host.url=${{ env.SONAR_HOST }}
+            -Dsonar.organization=${{ env.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=${{ steps.gradle_build.outputs.sources }}
+            -Dsonar.java.binaries=${{ steps.gradle_build.outputs.binaries }}
+            ${{ steps.gradle_build.outputs.tests && format('-Dsonar.tests={0}', steps.gradle_build.outputs.tests) || '' }}
+            -Dsonar.qualitygate.wait=true
+
+      # ---------- Report ----------
+      - name: Build the report
+        if: always() && (steps.maven.outcome != 'skipped' || steps.gradle.outcome != 'skipped')
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          cat > "$RUNNER_TEMP/sonar-report.mjs" <<'SCRIPT'
+          // Reads the SonarQube Cloud results of this analysis and writes a report:
+          //   sonar-report.md (also shown on the run's Summary page), sonar-report.json, sonar-issues.csv
+          import fs from 'node:fs';
+          const { SONAR_TOKEN, SONAR_HOST = 'https://sonarcloud.io', SONAR_PROJECT_KEY: KEY, PR_NUMBER, BRANCH } = process.env;
+          const scope = PR_NUMBER ? { pullRequest: PR_NUMBER } : { branch: BRANCH };
+          const auth = 'Basic ' + Buffer.from(SONAR_TOKEN + ':').toString('base64');
+          async function api(path, params) {
+            const url = `${SONAR_HOST}/api/${path}?` + new URLSearchParams({ ...params, ...scope });
+            const r = await fetch(url, { headers: { authorization: auth } });
+            if (!r.ok) throw new Error(`${path}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+            return r.json();
+          }
+          async function all(path, params, field) {
+            const out = [];
+            for (let p = 1; p <= 20; p++) {
+              const j = await api(path, { ...params, ps: 500, p });
+              out.push(...(j[field] || []));
+              const total = j.paging ? j.paging.total : (j.total ?? 0);
+              if (out.length >= total || !(j[field] || []).length) break;
+            }
+            return out;
+          }
+
+          const gate = (await api('qualitygates/project_status', { projectKey: KEY })).projectStatus || {};
+          const metrics = 'bugs,vulnerabilities,code_smells,security_hotspots,coverage,duplicated_lines_density,ncloc';
+          const measures = Object.fromEntries(((await api('measures/component', { component: KEY, metricKeys: metrics })).component?.measures || []).map(m => [m.metric, m.value ?? m.period?.value]));
+          const issues = await all('issues/search', { componentKeys: KEY, resolved: 'false' }, 'issues');
+          const hotspots = await all('hotspots/search', { projectKey: KEY, status: 'TO_REVIEW' }, 'hotspots').catch(e => { console.error('hotspots: ' + e.message); return []; });
+
+          const sevRank = { BLOCKER: 5, CRITICAL: 4, MAJOR: 3, MINOR: 2, INFO: 1, HIGH: 4, MEDIUM: 3, LOW: 2 };
+          const typeName = { BUG: 'Bug', VULNERABILITY: 'Vulnerability', CODE_SMELL: 'Code smell', SECURITY_HOTSPOT: 'Security hotspot' };
+          const fileOf = c => String(c || '').split(':').slice(1).join(':');
+          const rows = [
+            ...issues.map(i => ({ type: typeName[i.type] || i.type, severity: i.severity || (i.impacts?.[0]?.severity) || '', file: fileOf(i.component), line: i.line || '', rule: i.rule, message: i.message, effort: i.effort || '', link: `${SONAR_HOST}/project/issues?id=${encodeURIComponent(KEY)}&open=${i.key}` })),
+            ...hotspots.map(h => ({ type: 'Security hotspot', severity: h.vulnerabilityProbability || '', file: fileOf(h.component), line: h.line || '', rule: h.ruleKey, message: h.message, effort: '', link: `${SONAR_HOST}/security_hotspots?id=${encodeURIComponent(KEY)}&hotspots=${h.key}` })),
+          ].sort((a, b) => (sevRank[b.severity] || 0) - (sevRank[a.severity] || 0) || a.file.localeCompare(b.file));
+
+          const count = t => rows.filter(r => r.type === t).length;
+          const esc = s => String(s ?? '').replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+          const icon = gate.status === 'OK' ? '✅' : gate.status === 'ERROR' ? '❌' : '⚠️';
+          const md = [
+            `# SonarQube Cloud report`,
+            ``,
+            `**Project:** ${KEY} · **${PR_NUMBER ? 'Pull request #' + PR_NUMBER : 'Branch ' + BRANCH}** · [Open in SonarQube Cloud](${SONAR_HOST}/dashboard?id=${encodeURIComponent(KEY)}${PR_NUMBER ? '&pullRequest=' + PR_NUMBER : ''})`,
+            ``,
+            `## ${icon} Quality gate: ${gate.status || 'unknown'}`,
+            ``,
+            (gate.conditions || []).length ? ['| Condition | Actual | Threshold | Result |', '|---|---|---|---|', ...gate.conditions.map(c => `| ${c.metricKey} | ${c.actualValue ?? '-'} | ${c.comparator === 'GT' ? '>' : '<'} ${c.errorThreshold} | ${c.status === 'OK' ? '✅' : '❌'} |`)].join('\n') : '',
+            ``,
+            `## Summary`,
+            ``,
+            `| Bugs | Vulnerabilities | Code smells | Security hotspots | Coverage | Duplication | Lines of code |`,
+            `|---|---|---|---|---|---|---|`,
+            `| ${count('Bug')} | ${count('Vulnerability')} | ${count('Code smell')} | ${count('Security hotspot')} | ${measures.coverage ?? '-'}% | ${measures.duplicated_lines_density ?? '-'}% | ${measures.ncloc ?? '-'} |`,
+            ``,
+            `## Findings (${rows.length})`,
+            ``,
+            rows.length ? ['| Severity | Type | Where | Problem | Rule |', '|---|---|---|---|---|',
+              ...rows.slice(0, 300).map(r => `| ${r.severity} | ${r.type} | [\`${esc(r.file)}${r.line ? ':' + r.line : ''}\`](${r.link}) | ${esc(r.message)} | ${r.rule} |`),
+              rows.length > 300 ? `\n…and ${rows.length - 300} more in sonar-issues.csv.` : ''].join('\n') : 'No open findings.',
+          ].join('\n');
+
+          const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+          const csv = ['Severity,Type,File,Line,Problem,Rule,Effort,Link', ...rows.map(r => [r.severity, r.type, r.file, r.line, r.message, r.rule, r.effort, r.link].map(q).join(','))].join('\r\n');
+
+          fs.writeFileSync('sonar-report.md', md);
+          fs.writeFileSync('sonar-issues.csv', '\ufeff' + csv);
+          fs.writeFileSync('sonar-report.json', JSON.stringify({ project: KEY, ...scope, qualityGate: gate, measures, counts: { bugs: count('Bug'), vulnerabilities: count('Vulnerability'), codeSmells: count('Code smell'), hotspots: count('Security hotspot'), total: rows.length }, findings: rows }, null, 2));
+          if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
+          console.log(`Quality gate ${gate.status}. ${rows.length} findings.`);
+
+          SCRIPT
+          node "$RUNNER_TEMP/sonar-report.mjs"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-report
+          path: |
+            sonar-report.md
+            sonar-issues.csv
+            sonar-report.json
+          if-no-files-found: warn
+
+      - name: Fail if the quality gate failed
+        if: steps.maven.outcome == 'failure' || steps.gradle.outcome == 'failure' || (steps.maven.outcome == 'skipped' && steps.gradle.outcome == 'skipped')
+        run: |
+          echo "SonarQube Cloud analysis failed or the quality gate did not pass. See the report on the Summary page."
+          exit 1
