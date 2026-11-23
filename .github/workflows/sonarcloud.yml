@@ -7,16 +7,18 @@
 #   2. Set SONAR_ORGANIZATION and SONAR_PROJECT_KEY below (SonarQube Cloud > project > Information)
 #   3. SonarQube Cloud > project > Administration > Analysis Method > turn Automatic Analysis OFF
 #
-# Only the main branch is analyzed: the free SonarQube Cloud plan for private repos rejects
+# Only SonarQube Cloud's main branch is analyzed: the free plan for private repos rejects
 # pull request and branch analysis ("Organization is not allowed to access data from non main branches").
-# If you make the repo public or move to a paid plan, add the pull_request trigger back and drop the job's `if`.
+# Pushes to main and master both start the workflow; the one that is not SonarQube Cloud's main branch
+# is skipped with a notice. If you make the repo public or move to a paid plan, add the pull_request
+# trigger back, drop the job's `if` and the skip in the check step.
 
 name: SonarQube Cloud
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:      # manual runs are only analyzed when started on main
+    branches: [main, master]
+  workflow_dispatch:      # manual runs are only analyzed when started on main or master
 
 permissions:
   contents: read
@@ -29,7 +31,7 @@ env:
 
 jobs:
   sonar:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,9 +43,32 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
 
+      # Fails early with a clear message if the token, project key or main branch name is wrong
+      - name: Check SonarQube Cloud setup
+        id: check
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          [ -n "$SONAR_TOKEN" ] || { echo "::error::Secret SONAR_TOKEN is empty. Add it under repo Settings > Secrets and variables > Actions."; exit 1; }
+          get() { curl -s -u "$SONAR_TOKEN:" -o "$RUNNER_TEMP/resp.json" -w '%{http_code}' "$SONAR_HOST/api/$1"; }
+          [ "$(get authentication/validate)" = 200 ] && grep -q '"valid":true' "$RUNNER_TEMP/resp.json" \
+            || { echo "::error::SONAR_TOKEN is invalid or expired. Generate a new one in SonarQube Cloud > My Account > Security."; exit 1; }
+          code=$(get "project_branches/list?project=$SONAR_PROJECT_KEY")
+          if [ "$code" != 200 ]; then
+            echo "::error::Cannot read project '$SONAR_PROJECT_KEY' (HTTP $code: $(head -c 300 "$RUNNER_TEMP/resp.json")). Check SONAR_PROJECT_KEY / SONAR_ORGANIZATION and that the token's user can access the project."; exit 1
+          fi
+          main=$(node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1])).branches||[];console.log((b.find(x=>x.isMain)||{}).name||"")' "$RUNNER_TEMP/resp.json")
+          echo "SonarQube Cloud main branch: '$main', this run: '$BRANCH'"
+          if [ "$main" != "$BRANCH" ]; then
+            echo "::notice::Skipping analysis: SonarQube Cloud's main branch is '$main', this run is on '$BRANCH'. The free plan only analyzes the main branch. Push to '$main', or rename it in SonarQube Cloud > project > Administration > Branches and Pull Requests."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Finds the build file, also when the project is in a subfolder
       - name: Find the Java project
         id: find
+        if: steps.check.outputs.skip != 'true'
         run: |
           pick() { find . -path ./.git -prune -o -path '*/node_modules' -prune -o -name "$1" -type f -print | awk -F/ '{ print NF" "$0 }' | sort -n | head -1 | cut -d' ' -f2-; }
           pom=$(pick pom.xml); gradle=$(pick build.gradle); [ -n "$gradle" ] || gradle=$(pick build.gradle.kts)
@@ -73,7 +98,7 @@ jobs:
       # ---------- Gradle project ----------
       - name: Compile (Gradle)
         id: gradle_build
-        if: steps.find.outputs.kind != 'maven'
+        if: steps.find.outcome == 'success' && steps.find.outputs.kind != 'maven'
         working-directory: ${{ steps.find.outputs.dir }}
         run: |
           if [ "${{ steps.find.outputs.kind }}" = plain ]; then
@@ -128,7 +153,7 @@ jobs:
           //   sonar-report.md (also shown on the run's Summary page), sonar-report.json, sonar-issues.csv
           import fs from 'node:fs';
           const { SONAR_TOKEN, SONAR_HOST = 'https://sonarcloud.io', SONAR_PROJECT_KEY: KEY, PR_NUMBER, BRANCH } = process.env;
-          const scope = PR_NUMBER ? { pullRequest: PR_NUMBER } : (BRANCH && BRANCH !== 'main' ? { branch: BRANCH } : {});
+          const scope = PR_NUMBER ? { pullRequest: PR_NUMBER } : {};   // no branch parameter: only the main branch is analyzed
           const auth = 'Basic ' + Buffer.from(SONAR_TOKEN + ':').toString('base64');
           async function api(path, params) {
             const url = `${SONAR_HOST}/api/${path}?` + new URLSearchParams({ ...params, ...scope });
@@ -206,7 +231,7 @@ jobs:
           node "$RUNNER_TEMP/sonar-report.mjs"
 
       - name: Upload the report
-        if: always()
+        if: always() && steps.check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sonar-report
@@ -217,7 +242,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Fail if the quality gate failed
-        if: steps.maven.outcome == 'failure' || steps.gradle.outcome == 'failure' || (steps.maven.outcome == 'skipped' && steps.gradle.outcome == 'skipped')
+        if: steps.check.outputs.skip != 'true' && (steps.maven.outcome == 'failure' || steps.gradle.outcome == 'failure' || (steps.maven.outcome == 'skipped' && steps.gradle.outcome == 'skipped'))
         run: |
           echo "SonarQube Cloud analysis failed or the quality gate did not pass. See the report on the Summary page."
           exit 1
