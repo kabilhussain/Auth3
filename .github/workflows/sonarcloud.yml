@@ -6,15 +6,17 @@
 #   1. Repo secret SONAR_TOKEN (SonarQube Cloud > My Account > Security > Generate token)
 #   2. Set SONAR_ORGANIZATION and SONAR_PROJECT_KEY below (SonarQube Cloud > project > Information)
 #   3. SonarQube Cloud > project > Administration > Analysis Method > turn Automatic Analysis OFF
+#
+# Only the main branch is analyzed: the free SonarQube Cloud plan for private repos rejects
+# pull request and branch analysis ("Organization is not allowed to access data from non main branches").
+# If you make the repo public or move to a paid plan, add the pull_request trigger back and drop the job's `if`.
 
 name: SonarQube Cloud
 
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened]
-  workflow_dispatch:
+  workflow_dispatch:      # manual runs are only analyzed when started on main
 
 permissions:
   contents: read
@@ -27,6 +29,7 @@ env:
 
 jobs:
   sonar:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +128,7 @@ jobs:
           //   sonar-report.md (also shown on the run's Summary page), sonar-report.json, sonar-issues.csv
           import fs from 'node:fs';
           const { SONAR_TOKEN, SONAR_HOST = 'https://sonarcloud.io', SONAR_PROJECT_KEY: KEY, PR_NUMBER, BRANCH } = process.env;
-          const scope = PR_NUMBER ? { pullRequest: PR_NUMBER } : { branch: BRANCH };
+          const scope = PR_NUMBER ? { pullRequest: PR_NUMBER } : (BRANCH && BRANCH !== 'main' ? { branch: BRANCH } : {});
           const auth = 'Basic ' + Buffer.from(SONAR_TOKEN + ':').toString('base64');
           async function api(path, params) {
             const url = `${SONAR_HOST}/api/${path}?` + new URLSearchParams({ ...params, ...scope });
