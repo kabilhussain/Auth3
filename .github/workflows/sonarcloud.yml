@@ -133,7 +133,14 @@ jobs:
           async function api(path, params) {
             const url = `${SONAR_HOST}/api/${path}?` + new URLSearchParams({ ...params, ...scope });
             const r = await fetch(url, { headers: { authorization: auth } });
-            if (!r.ok) throw new Error(`${path}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+            if (!r.ok) {
+              const text = await r.text();
+              if (r.status === 403 && /non main branch/i.test(text)) {
+                console.error('SonarQube Cloud refused: on this plan it only gives results for the main branch. Run the workflow on main, make the repo public, or use a paid plan.');
+                process.exit(1);
+              }
+              throw new Error(`${path}: HTTP ${r.status} ${text.slice(0, 200)}`);
+            }
             return r.json();
           }
           async function all(path, params, field) {
